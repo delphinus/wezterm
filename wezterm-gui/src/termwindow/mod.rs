@@ -1566,16 +1566,28 @@ impl TermWindow {
 
     fn schedule_window_event(&mut self, name: &str, pane_id: Option<PaneId>) {
         let window = GuiWin::new(self);
-        let pane = match pane_id {
-            Some(pane_id) => Mux::get().get_pane(pane_id),
-            None => None,
+        let pane_id = match pane_id {
+            Some(id) => id,
+            None => {
+                // If no pane_id specified, get the active pane from the mux.
+                // We avoid get_active_pane_or_overlay() here to ensure we get
+                // an actual mux pane, not an overlay.
+                match self.get_active_pane_or_overlay() {
+                    Some(pane) => pane.pane_id(),
+                    None => return,
+                }
+            }
         };
-        let pane = match pane {
+        let pane = match Mux::get().get_pane(pane_id) {
             Some(pane) => pane,
-            None => match self.get_active_pane_or_overlay() {
-                Some(pane) => pane,
-                None => return,
-            },
+            None => {
+                log::warn!(
+                    "schedule_window_event: pane {} not found in mux, event {} will not be delivered",
+                    pane_id,
+                    name
+                );
+                return;
+            }
         };
         let pane = MuxPane(pane.pane_id());
         let name = name.to_string();
@@ -2832,7 +2844,10 @@ impl TermWindow {
                 self.do_open_link_at_mouse_cursor(pane);
             }
             EmitEvent(name) => {
-                self.emit_window_event(name, None);
+                // Pass the pane_id to ensure the event handler gets the correct pane.
+                // The pane passed here might be an overlay, but overlays report the
+                // underlying pane's ID, so this should work correctly.
+                self.emit_window_event(name, Some(pane.pane_id()));
             }
             CompleteSelectionOrOpenLinkAtMouseCursor(dest) => {
                 let text = self.selection_text(pane);

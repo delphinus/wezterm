@@ -1,0 +1,14 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(git log:*)",
+      "Bash(cargo test:*)",
+      "Bash(cargo build:*)",
+      "Bash(target/release/wezterm:*)",
+      "Bash(target/release/wezterm-gui:*)",
+      "Read(//Users/jinnouchi.yasushi/.config/wezterm/**)"
+    ],
+    "deny": [],
+    "ask": []
+  }
+}
