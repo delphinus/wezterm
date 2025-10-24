@@ -933,6 +933,7 @@ impl TermWindow {
             }
             WindowEvent::PerformKeyAssignment(action) => {
                 if let Some(pane) = self.get_active_pane_or_overlay() {
+                    log::info!("WindowEvent::PerformKeyAssignment: pane_id={}", pane.pane_id());
                     self.perform_key_assignment(&pane, &action)?;
                     window.invalidate();
                 }
@@ -1133,9 +1134,12 @@ impl TermWindow {
                     let active_pane = self
                         .get_active_pane_or_overlay()
                         .ok_or_else(|| anyhow!("there is no active pane!?"))?;
+                    log::info!("TermWindowNotif::PerformAssignment: requested pane_id={}, active_pane.pane_id()={}", pane_id, active_pane.pane_id());
                     let pane = if active_pane.pane_id() == pane_id {
+                        log::info!("  -> Using active_pane (overlay or same pane)");
                         active_pane
                     } else {
+                        log::info!("  -> Getting pane from mux");
                         mux.get_pane(pane_id)
                             .ok_or_else(|| anyhow!("pane id {} is not valid", pane_id))?
                     };
@@ -1570,9 +1574,9 @@ impl TermWindow {
             Some(id) => id,
             None => {
                 // If no pane_id specified, get the active pane from the mux.
-                // We avoid get_active_pane_or_overlay() here to ensure we get
+                // We use get_active_pane_no_overlay() here to ensure we get
                 // an actual mux pane, not an overlay.
-                match self.get_active_pane_or_overlay() {
+                match self.get_active_pane_no_overlay() {
                     Some(pane) => pane.pane_id(),
                     None => return,
                 }

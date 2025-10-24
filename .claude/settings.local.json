@@ -6,7 +6,9 @@
       "Bash(cargo build:*)",
       "Bash(target/release/wezterm:*)",
       "Bash(target/release/wezterm-gui:*)",
-      "Read(//Users/jinnouchi.yasushi/.config/wezterm/**)"
+      "Read(//Users/jinnouchi.yasushi/.config/wezterm/**)",
+      "Read(//Users/jinnouchi.yasushi/git/dotfiles/.config/wezterm/**)",
+      "Bash(git add:*)"
     ],
     "deny": [],
     "ask": []

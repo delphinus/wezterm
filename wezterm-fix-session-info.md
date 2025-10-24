@@ -1,6 +1,128 @@
 # WezTerm EmitEvent Fix - セッション情報
 
-## 実施した修正
+## 現在の状況（2025-10-24 更新）
+
+### 問題の再発見
+初期の修正では問題が完全に解決せず、multiplexing環境でpane IDのずれが依然として発生することが判明。
+
+**テスト結果:**
+1. pane 0 で CMD+e → `pane_id: 1` (ずれ: +1)
+2. `wezterm cli split-pane` で分割 → pane 4
+3. pane 4 で CMD+e → `pane_id: 5` (ずれ: +1)
+4. 再度 split-pane → pane 7
+5. pane 7 で CMD+e → `pane_id: 9` (ずれ: +2)
+6. 再度 split-pane → pane 11
+7. pane 11 で CMD+e → `pane_id: 14` (ずれ: +3)
+
+**観察:** paneを分割するたびに、pane_idのずれが増加する。
+
+### 追加調査と修正
+
+#### 修正3: `schedule_window_event` の overlay 処理
+**ファイル:** `wezterm-gui/src/termwindow/mod.rs`
+**行番号:** 1575
+
+**問題:** コメントでは「overlayを避ける」と書いていたが、実際には`get_active_pane_or_overlay()`を呼んでいた。
+
+```diff
+  let pane_id = match pane_id {
+      Some(id) => id,
+      None => {
+          // If no pane_id specified, get the active pane from the mux.
+-         // We avoid get_active_pane_or_overlay() here to ensure we get
++         // We use get_active_pane_no_overlay() here to ensure we get
+          // an actual mux pane, not an overlay.
+-         match self.get_active_pane_or_overlay() {
++         match self.get_active_pane_no_overlay() {
+              Some(pane) => pane.pane_id(),
+              None => return,
+          }
+      }
+  };
+```
+
+#### デバッグログの追加
+
+**WindowEvent::PerformKeyAssignment (行936):**
+```rust
+log::info!("WindowEvent::PerformKeyAssignment: pane_id={}", pane.pane_id());
+```
+
+**TermWindowNotif::PerformAssignment (行1137-1142):**
+```rust
+log::info!("TermWindowNotif::PerformAssignment: requested pane_id={}, active_pane.pane_id()={}", pane_id, active_pane.pane_id());
+let pane = if active_pane.pane_id() == pane_id {
+    log::info!("  -> Using active_pane (overlay or same pane)");
+    active_pane
+} else {
+    log::info!("  -> Getting pane from mux");
+    mux.get_pane(pane_id)
+        .ok_or_else(|| anyhow!("pane id {} is not valid", pane_id))?
+};
+```
+
+### 根本原因の分析
+
+#### 1. KeyAssignment の実行フロー
+```
+CMD+e 押下
+  ↓
+WindowEvent::PerformKeyAssignment
+  ↓ get_active_pane_or_overlay() でpaneを取得
+  ↓
+perform_key_assignment(&pane, &action)
+  ↓
+action_callback の Lua 関数が実行される
+  ↓
+window:perform_action(SplitPane, pane) が呼ばれる
+  ↓
+TermWindowNotif::PerformAssignment { pane_id: pane.pane_id(), ... }
+  ↓ 再度 get_active_pane_or_overlay() を呼ぶ
+  ↓
+active_pane.pane_id() と requested pane_id を比較
+```
+
+#### 2. 問題の所在
+`TermWindowNotif::PerformAssignment` (mod.rs:1133-1141) で、以下のロジックが使われている:
+
+```rust
+let active_pane = self.get_active_pane_or_overlay()
+    .ok_or_else(|| anyhow!("there is no active pane!?"))?;
+let pane = if active_pane.pane_id() == pane_id {
+    active_pane  // overlay の可能性あり
+} else {
+    mux.get_pane(pane_id)  // mux から取得
+        .ok_or_else(|| anyhow!("pane id {} is not valid", pane_id))?
+};
+```
+
+このコードは、CopyMode overlay のために実装された（[#3209](https://github.com/wezterm/wezterm/issues/3209)参照）が、multiplexing環境で問題を引き起こしている可能性がある。
+
+### 次のステップ
+
+1. **デバッグログの確認**
+   ```bash
+   RUST_LOG=info ./target/release/wezterm --config-file ~/.config/wezterm/test.lua connect unix 2>&1 | grep -E "(WindowEvent::PerformKeyAssignment|TermWindowNotif::PerformAssignment)"
+   ```
+
+   ログから以下を確認:
+   - `WindowEvent::PerformKeyAssignment` で取得される pane_id
+   - `TermWindowNotif::PerformAssignment` の requested pane_id と active_pane.pane_id()
+   - どちらのブランチ（active_pane vs mux.get_pane）が使われているか
+
+2. **根本原因の特定**
+   - multiplexing環境で`get_active_pane_or_overlay()`が間違ったpaneを返している可能性
+   - client/server間の状態同期のタイミング問題の可能性
+   - overlay と mux pane の ID の関係性の問題の可能性
+
+3. **修正案の検討**
+   - `TermWindowNotif::PerformAssignment`で常に`mux.get_pane(pane_id)`を優先する
+   - overlayの場合の特別処理を見直す
+   - multiplexing環境での状態同期を確認する
+
+---
+
+## 以前の修正内容
 
 ### 修正1: `EmitEvent` ハンドラー
 **ファイル:** `wezterm-gui/src/termwindow/mod.rs`
@@ -37,9 +159,9 @@
 +         Some(id) => id,
 +         None => {
 +             // If no pane_id specified, get the active pane from the mux.
-+             // We avoid get_active_pane_or_overlay() here to ensure we get
++             // We use get_active_pane_no_overlay() here to ensure we get
 +             // an actual mux pane, not an overlay.
-+             match self.get_active_pane_or_overlay() {
++             match self.get_active_pane_no_overlay() {
 +                 Some(pane) => pane.pane_id(),
 +                 None => return,
 +             }
@@ -59,36 +181,6 @@
       let pane = MuxPane(pane.pane_id());
 ```
 
-## 問題の原因
-
-### 第1の問題: `EmitEvent` が `None` を渡していた
-- 2021年9月23日のコミット `2337c06c0` で `emit_window_event` に `pane_id` パラメータが追加された
-- `EmitEvent` は機械的に `None` を渡すように変更されただけで、元の設計意図（正しいpaneを渡す）が失われた
-- `None` を渡すと `schedule_window_event` 内で `get_active_pane_or_overlay()` にフォールバックするが、これが誤ったpaneを返す可能性がある
-
-### 第2の問題: `schedule_window_event` のフォールバックロジック
-- `pane_id` が指定されていても、`Mux::get().get_pane(pane_id)` が `None` を返した場合、`get_active_pane_or_overlay()` にフォールバック
-- overlay は mux に登録されていないため、overlay の pane_id で検索すると失敗する
-- フォールバックで取得した pane が、期待するものと異なる可能性がある（特に multiplexing 環境や複数 pane が開いている場合）
-
-### 根本原因
-- multiplexing 環境では、イベント発火時とイベントハンドラー実行時でアクティブな pane が変わる可能性がある
-- overlay が関与する場合、overlay の pane_id と実際の mux pane の関係が正しく処理されていなかった
-- 結果として、Lua イベントハンドラーに渡される `pane` パラメータが、イベントが発火した元の pane ではなく、別の pane を指していた
-
-## 修正の効果
-
-1. **`EmitEvent` での修正**:
-   - イベント発火時の pane の ID を明示的に渡すことで、どの pane に対するイベントかを明確にする
-   - overlay の場合でも、overlay は元の pane の ID を返すため、正しく動作する
-
-2. **`schedule_window_event` での修正**:
-   - 必ず `Mux::get().get_pane(pane_id)` で実際の mux pane を取得する
-   - pane が見つからない場合は警告ログを出力し、イベントを配信しない（誤った pane へのイベント配信を防ぐ）
-   - `get_active_pane_or_overlay()` を直接使わず、まず pane_id を取得してから mux pane を検索することで、overlay と実際の pane の関係を正しく処理
-
-これにより、Lua イベントハンドラーに渡される `pane` パラメータが、常にイベントが発火した元の pane を指すようになります。
-
 ## ビルド済みバイナリ
 
 **場所:** `/Users/jinnouchi.yasushi/git/github.com/wez/wezterm/target/release/`
@@ -103,19 +195,20 @@
 2. 新しいweztermセッションを修正済みバイナリで起動:
    ```bash
    cd /Users/jinnouchi.yasushi/git/github.com/wez/wezterm
-   ./target/release/wezterm --config-file ~/.config/wezterm/test.lua connect unix
+   RUST_LOG=info ./target/release/wezterm --config-file ~/.config/wezterm/test.lua connect unix 2>&1 | tee wezterm-debug.log
    ```
 3. いくつか pane を開く
-4. 各 pane で `echo $WEZTERM_PANE` を実行して ID を確認（例: 11）
+4. 各 pane で `echo $WEZTERM_PANE` を実行して ID を確認（例: 0）
 5. CMD+e を押す
 6. 新しく開いた pane に表示される以下の値を確認:
-   - `WEZTERM_PANE`: 新しい pane の ID（例: 17）
-   - `pane_id`: 元の pane の ID（例: 11）← **これが正しく表示されることを確認**
+   - `WEZTERM_PANE`: 新しい pane の ID（例: 1）
+   - `pane_id`: 元の pane の ID（例: 0）← **これが正しく表示されることを確認**
+7. ログファイル `wezterm-debug.log` を確認して、pane IDの流れを追跡
 
 ### 期待される結果
 
-- **修正前**: `pane_id` の値が元の pane の ID より 1 少ない（例: 10）
-- **修正後**: `pane_id` の値が元の pane の ID と一致（例: 11）
+- **修正前**: `pane_id` の値が元の pane の ID からずれる
+- **修正後**: `pane_id` の値が元の pane の ID (`$WEZTERM_PANE`) と一致
 
 ## Git差分の確認
 
@@ -126,25 +219,59 @@ git diff wezterm-gui/src/termwindow/mod.rs
 
 ## ビルド＆テスト結果
 
-### 最新ビルド (2025-10-22)
-- ✅ コンパイル成功 (`cargo build --release`)
-- ✅ wezterm-gui テスト通過 (12個のテスト)
-- ⚠️ wezterm-ssh テスト: 3個失敗（sftp symlink 関連、今回の修正とは無関係）
-- ビルド時間: 44.66秒
-
-### 追加ビルド (2025-10-22)
-- ✅ `wezterm-gui` と `wezterm-mux-server` を再コンパイル
-- コマンド: `cargo build --release --bin wezterm-gui --bin wezterm-mux-server`
-- ビルド時間: 38.69秒
+### 最新ビルド (2025-10-24)
+- ✅ コンパイル成功 (`cargo build --release --bin wezterm-gui --bin wezterm-mux-server`)
+- ビルド時間: 2分29秒
+- デバッグログ追加済み
 - すべてのバイナリが最新のソースコードでコンパイル済み
 
-## 次のステップ
+### テスト設定ファイル
 
-1. **[現在]** 修正の動作確認
-   - `./target/release/wezterm --config-file ~/.config/wezterm/test.lua connect unix` で起動
-   - CMD+e で `pane:pane_id()` が正しく取得できるか確認
-   - 複数の pane で繰り返しテストして、常に正しい ID が取得できることを確認
-2. 問題が解決していれば、weztermリポジトリにプルリクエストを作成
-   - コミットメッセージを作成
-   - PR の説明を準備
-   - 必要に応じてテストケースの追加を検討
+**~/.config/wezterm/test.lua:**
+```lua
+local wezterm = require "wezterm"
+local config = wezterm.config_builder()
+config.unix_domains = { { name = "unix" } }
+config.keys = {
+  {
+    key = "e",
+    mods = "CMD",
+    action = wezterm.action_callback(function(window, pane)
+      window:perform_action(
+        wezterm.action.SplitPane {
+          direction = "Down",
+          command = {
+            args = {
+              "sh",
+              "-c",
+              ([[
+                echo "WEZTERM_PANE: $WEZTERM_PANE";
+                echo "pane_id: %d";
+                sleep 100;
+              ]]):format(pane:pane_id()),
+            },
+          },
+          size = { Cells = 10 },
+        },
+        pane
+      )
+    end),
+  },
+}
+return config
+```
+
+## 関連ファイル
+
+- `wezterm-gui/src/termwindow/mod.rs` - メインの修正ファイル
+- `wezterm-gui/src/scripting/guiwin.rs` - `window:perform_action()` の実装
+- `~/.config/wezterm/test.lua` - テスト用設定ファイル
+
+## 参考情報
+
+- Issue #3209: CopyMode overlay が pane_id をエイリアスする問題
+- 関連する関数:
+  - `get_active_pane_or_overlay()` - overlay を含めてアクティブな pane を取得
+  - `get_active_pane_no_overlay()` - overlay を除外してアクティブな pane を取得
+  - `schedule_window_event()` - window イベントをスケジュール
+  - `perform_key_assignment()` - キーアサインメントを実行
