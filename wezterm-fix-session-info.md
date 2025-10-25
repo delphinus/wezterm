@@ -1,6 +1,111 @@
 # WezTerm EmitEvent Fix - セッション情報
 
-## 現在の状況（2025-10-24 更新）
+## 最終的な解決策（2025-10-25 更新）
+
+### 根本原因の特定
+
+multiplexing環境では、**GUI側のpane IDとCLI側のpane IDが異なる**ことが判明。
+
+**pane IDの関係：**
+```
+起動時（ローカル）: GUI pane 0
+↓ multiplexingサーバーに接続
+サーバー接続後: GUI pane 1 ← CLI pane 0
+split-pane後: GUI pane 2 ← CLI pane 1
+```
+
+**関係式: `GUI pane ID = CLI pane ID + 1` (multiplexing環境)**
+
+### editpromptのユースケース
+
+editprompt（https://github.com/eetann/editprompt）は以下の動作をする：
+
+1. WezTerm上で設定したマッピングを押す
+2. 新しいpaneが開き、エディタ（Neovim等）が起動
+3. エディタで文字列を入力・保存・終了
+4. `wezterm cli send-text --pane-id [pane_id]` で元のpaneにテキストを送信
+
+**問題：** `wezterm cli send-text` は**CLI側のpane ID**を使用するが、Luaの`pane:pane_id()`は**GUI側のpane ID**を返す。
+
+### $WEZTERM_PANEの問題
+
+環境変数`$WEZTERM_PANE`は、**そのシェルが実行されているpaneのID**を保持する。
+
+```lua
+-- 問題のあるコード例
+act.SplitPane {
+  command = {
+    args = { "fish", "-c", "editprompt -t $WEZTERM_PANE" }
+  }
+}
+```
+
+このコードの実行フロー：
+1. 元のpane（CLI pane 3）でCMD+eを押す
+2. 新しいpane（CLI pane 14）が開く
+3. editpromptはその新しいpane内で実行される
+4. `$WEZTERM_PANE`を参照すると`14`（**新しいpane自身のID**）
+5. `wezterm cli send-text --pane-id 14` → 自分自身に送信
+6. editprompt終了でpane 14が閉じる → テキストが消える
+
+### 最終的な解決策
+
+**Lua側でdomain判定を行い、GUI pane IDからCLI pane IDを計算する：**
+
+```lua
+local editprompt = wezterm.action_callback(function(window, pane)
+  local gui_pane_id = pane:pane_id()
+  local cli_pane_id = gui_pane_id
+
+  -- multiplexing環境の判定
+  local domain = pane:get_domain_name()
+  if domain and domain ~= "local" then
+    -- unix domainなどのmultiplexing環境ではGUI ID - 1 = CLI ID
+    cli_pane_id = gui_pane_id - 1
+  end
+
+  window:perform_action(
+    act.SplitPane {
+      direction = "Down",
+      command = {
+        args = {
+          "/opt/homebrew/bin/fish",
+          "-c",
+          -- Lua側で計算したCLI pane IDを直接埋め込む
+          ("editprompt -e ~/git/dotfiles/bin/minivim -m wezterm -t %d --always-copy"):format(cli_pane_id),
+        },
+      },
+      size = { Cells = 10 },
+    },
+    pane
+  )
+end)
+```
+
+**重要なポイント：**
+- `$WEZTERM_PANE`は使わない（新しいpane自身のIDになってしまう）
+- Lua側で計算した`cli_pane_id`を`format()`で埋め込む
+- `domain ~= "local"`でmultiplexing環境を判定
+
+### 検証結果
+
+```fish
+# multiplexing環境で
+~ ❯❯❯ wezterm cli list
+WINID TABID PANEID WORKSPACE SIZE   TITLE              CWD
+    0     0      0 default   200x16 ~                  file://58988-mac/Users/jinnouchi.yasushi
+    0     0      2 default   200x19 ~                  file://58988-mac/Users/jinnouchi.yasushi
+    0     0      3 default   200x42 wezterm cli list ~ file://58988-mac/Users/jinnouchi.yasushi
+
+# pane 3でCMD+eを押す
+# → Lua: gui_pane_id = 4, domain = "unix", cli_pane_id = 3
+# → editpromptは正しくpane 3にテキストを送信
+# → ✅ 成功！
+```
+
+---
+
+## 以前の調査（2025-10-24）
 
 ### 問題の再発見
 初期の修正では問題が完全に解決せず、multiplexing環境でpane IDのずれが依然として発生することが判明。

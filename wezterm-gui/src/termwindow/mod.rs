@@ -1569,15 +1569,23 @@ impl TermWindow {
     }
 
     fn schedule_window_event(&mut self, name: &str, pane_id: Option<PaneId>) {
+        log::info!("schedule_window_event: event={}, received pane_id={:?}", name, pane_id);
         let window = GuiWin::new(self);
         let pane_id = match pane_id {
-            Some(id) => id,
+            Some(id) => {
+                log::info!("  -> Using provided pane_id={}", id);
+                id
+            }
             None => {
                 // If no pane_id specified, get the active pane from the mux.
                 // We use get_active_pane_no_overlay() here to ensure we get
                 // an actual mux pane, not an overlay.
                 match self.get_active_pane_no_overlay() {
-                    Some(pane) => pane.pane_id(),
+                    Some(pane) => {
+                        let id = pane.pane_id();
+                        log::info!("  -> Getting from get_active_pane_no_overlay: pane_id={}", id);
+                        id
+                    }
                     None => return,
                 }
             }
@@ -1653,6 +1661,7 @@ impl TermWindow {
     }
 
     pub fn emit_window_event(&mut self, name: &str, pane_id: Option<PaneId>) {
+        log::info!("emit_window_event: event={}, pane_id={:?}", name, pane_id);
         if self.get_active_pane_or_overlay().is_none() || self.window.is_none() {
             return;
         }
@@ -2603,6 +2612,11 @@ impl TermWindow {
     ) -> anyhow::Result<PerformAssignmentResult> {
         use KeyAssignment::*;
 
+        // Log the pane ID passed to perform_key_assignment
+        if matches!(assignment, EmitEvent(_)) {
+            log::info!("perform_key_assignment: assignment=EmitEvent, pane.pane_id()={}", pane.pane_id());
+        }
+
         if let Some(modal) = self.get_modal() {
             if modal.perform_assignment(assignment, self) {
                 return Ok(PerformAssignmentResult::Handled);
@@ -2848,10 +2862,18 @@ impl TermWindow {
                 self.do_open_link_at_mouse_cursor(pane);
             }
             EmitEvent(name) => {
-                // Pass the pane_id to ensure the event handler gets the correct pane.
-                // The pane passed here might be an overlay, but overlays report the
-                // underlying pane's ID, so this should work correctly.
-                self.emit_window_event(name, Some(pane.pane_id()));
+                // In multiplexing environments, we need to get the active pane
+                // directly from the mux to ensure we have the correct pane ID.
+                // The pane passed to perform_key_assignment might not reflect
+                // the current mux state, especially in async contexts.
+                let pane_id_from_arg = pane.pane_id();
+                let pane_id_from_get_active = self.get_active_pane_no_overlay()
+                    .map(|p| p.pane_id());
+                log::info!(
+                    "EmitEvent: name={}, pane_id_from_arg={}, pane_id_from_get_active={:?}",
+                    name, pane_id_from_arg, pane_id_from_get_active
+                );
+                self.emit_window_event(name, pane_id_from_get_active);
             }
             CompleteSelectionOrOpenLinkAtMouseCursor(dest) => {
                 let text = self.selection_text(pane);

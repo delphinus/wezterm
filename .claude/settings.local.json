@@ -8,7 +8,13 @@
       "Bash(target/release/wezterm-gui:*)",
       "Read(//Users/jinnouchi.yasushi/.config/wezterm/**)",
       "Read(//Users/jinnouchi.yasushi/git/dotfiles/.config/wezterm/**)",
-      "Bash(git add:*)"
+      "Bash(git add:*)",
+      "Bash(test:*)",
+      "Bash(rustup toolchain:*)",
+      "Bash(cargo:*)",
+      "Bash(pkill:*)",
+      "Bash(find:*)",
+      "Read(//Users/jinnouchi.yasushi/git/github.com/eetann/editprompt/**)"
     ],
     "deny": [],
     "ask": []
