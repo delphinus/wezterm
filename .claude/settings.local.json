@@ -14,7 +14,8 @@
       "Bash(cargo:*)",
       "Bash(pkill:*)",
       "Bash(find:*)",
-      "Read(//Users/jinnouchi.yasushi/git/github.com/eetann/editprompt/**)"
+      "Read(//Users/jinnouchi.yasushi/git/github.com/eetann/editprompt/**)",
+      "Bash(git commit:*)"
     ],
     "deny": [],
     "ask": []
